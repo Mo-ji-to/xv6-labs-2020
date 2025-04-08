@@ -20,3 +20,5 @@ myapi.key
 xv6.out*
 .vagrant/
 submissions/
+gdb-9.2
+gdb-9.2/build/gdb/gdb

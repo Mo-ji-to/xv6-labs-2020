@@ -6,6 +6,9 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
+/*sysproc.c是系统进程管理文件  包括了系统调用和时间管理等功能，为用户态程序提供与内核交互的接口
+用户程序可以用下列程序 进行进程管理 内存分配 和 时间相关的操作 */
+
 
 uint64
 sys_exit(void)
@@ -95,3 +98,11 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+uint64
+sys_trace(void)
+{
+  //获取系统调用的参数
+  argint(0,&(myproc()->trace_mask));
+  return 0;
+} 
