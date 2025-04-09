@@ -6,6 +6,8 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
+
+#include "sysinfo.h"
 /*sysproc.c是系统进程管理文件  包括了系统调用和时间管理等功能，为用户态程序提供与内核交互的接口
 用户程序可以用下列程序 进行进程管理 内存分配 和 时间相关的操作 */
 
@@ -106,3 +108,23 @@ sys_trace(void)
   argint(0,&(myproc()->trace_mask));
   return 0;
 } 
+
+//收集系统信息
+uint64
+sys_sysinfo(void)
+{
+  struct sysinfo info;
+  freebytes(&info.freemem);
+  procnum(&info.nproc);
+
+  // 获取虚拟地址
+  uint64 dstaddr;
+  argaddr(0, &dstaddr);
+
+  // 从内核空间拷贝数据到用户空间
+  if (copyout(myproc()->pagetable, dstaddr, (char *)&info, sizeof info) < 0)
+    return -1;
+
+  return 0;
+}
+

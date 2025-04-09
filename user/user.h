@@ -26,6 +26,9 @@ int uptime(void);
 
 int trace(int);     //用户态程序可以找到trace系统调用的跳板入口函数
 
+//声明sysinfo结构体和sysinfo系统调用的跳板入口函数
+struct sysinfo;
+int sysinfo(struct sysinfo*);
 // ulib.c
 int stat(const char*, struct stat*);
 char* strcpy(char*, const char*);
