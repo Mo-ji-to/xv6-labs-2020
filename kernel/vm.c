@@ -6,8 +6,18 @@
 #include "defs.h"
 #include "fs.h"
 
+/*最核心的函数是walk和mappages，前者为虚拟地址找到PTE，后者为新映射装载PTE。
+名称以kvm开头的函数操作内核页表；以uvm开头的函数操作用户页表；其他函数用于二者。
+copyout和copyin复制数据到用户虚拟地址或从用户虚拟地址复制数据，
+这些虚拟地址作为系统调用参数提供*/
+
 /*
  * the kernel's page table.
+ 在riscv.h中有如下定义 
+ typedef uint64 *pagetable_t; // 512 PTEs
+ pagetable_t其实就是一个指向根页表页的 指针
+ 一个pagetable_t既可以是内核页表 也可以是进程页表
+ 核心函数是walk和mappages
  */
 pagetable_t kernel_pagetable;
 
@@ -17,14 +27,18 @@ extern char trampoline[]; // trampoline.S
 
 /*
  * create a direct-map page table for the kernel.
+ 创建并初始化内核页表 
+ 并完成内核的虚拟内存映射 确保内核能够正确访问硬件设备、内核代码和数据段等。
+kvmmap调用mappages()
  */
 void
 kvminit()
 {
   kernel_pagetable = (pagetable_t) kalloc();
-  memset(kernel_pagetable, 0, PGSIZE);
+  memset(kernel_pagetable, 0, PGSIZE);//分配一个页面大小的内存给kernel_pagetable，即初始化内核页表
 
   // uart registers
+  //UART0的虚拟地址映射到UART0的物理地址，大小为一个页面（PGSIZE），权限为可读可写（PTE_R | PTE_W）。这是为了访问串口设备的寄存器。
   kvmmap(UART0, UART0, PGSIZE, PTE_R | PTE_W);
 
   // virtio mmio disk interface
@@ -49,6 +63,8 @@ kvminit()
 
 // Switch h/w page table register to the kernel's page table,
 // and enable paging.
+/*安装内核页表 将根页表页的物理地址写入寄存器satp；之后CPU将使用内核页表转换地址
+由于内核使用标识映射，下一条指令的当前虚拟地址将映射到正确的物理内存地址。*/
 void
 kvminithart()
 {
@@ -68,27 +84,33 @@ kvminithart()
 //   21..29 -- 9 bits of level-1 index.
 //   12..20 -- 9 bits of level-0 index.
 //    0..11 -- 12 bits of byte offset within the page.
+
+/*在多级页表中查找虚拟地址对应的页表项PTE 如果需要 还会分配新的页表页*/
 pte_t *
-walk(pagetable_t pagetable, uint64 va, int alloc)
+walk(pagetable_t pagetable, uint64 va, int alloc)//页表根指针pagetable 虚拟地址va 返回值alloc 如果为1 代表需要分配新的页表页
 {
-  if(va >= MAXVA)
+  if(va >= MAXVA)//虚拟地址是否在范围内 超出调用panic 触发崩溃 错误信息"walk"
     panic("walk");
 
+      /*多级页表查找 一次从3级页表中获取9个比特位。它使用上一级的9位虚拟地址来查找下一级页表或最终页面的PTE*/
   for(int level = 2; level > 0; level--) {
-    pte_t *pte = &pagetable[PX(level, va)];
-    if(*pte & PTE_V) {
-      pagetable = (pagetable_t)PTE2PA(*pte);
+    pte_t *pte = &pagetable[PX(level, va)];//计算当前页表项PTE的索引 一个64位数的指针？
+    if(*pte & PTE_V) {//判断PTE是否存在
+      pagetable = (pagetable_t)PTE2PA(*pte);//存在则更新pagetable为下一级页表的基地址
     } else {
-      if(!alloc || (pagetable = (pde_t*)kalloc()) == 0)
+      /*kalloc分配一个页面大小的内存并memset初始化为0
+      分配完成后 更新pagetable为新的页表基地址*/
+      if(!alloc || (pagetable = (pde_t*)kalloc()) == 0)//如果alloc为0 或者 分配失败 返回0
         return 0;
       memset(pagetable, 0, PGSIZE);
       *pte = PA2PTE(pagetable) | PTE_V;
     }
   }
-  return &pagetable[PX(0, va)];
+  return &pagetable[PX(0, va)];//成功进行多级页表查找后 则返回第一级页表项中的页表项指针 该页表项PTE记录了映射到物理地址的44位物理页框（块号？）
 }
 
 // Look up a virtual address, return the physical address,
+/*即 查找 虚拟地址 对应的 物理地址*/
 // or 0 if not mapped.
 // Can only be used to look up user pages.
 uint64
@@ -117,6 +139,10 @@ walkaddr(pagetable_t pagetable, uint64 va)
 void
 kvmmap(uint64 va, uint64 pa, uint64 sz, int perm)
 {
+  //将va虚拟地址映射到pa物理地址 映射大小sz  perm为映射的访问权限
+  //mappages为上边提到的映射分配页表项
+  /*将范围虚拟地址到同等范围物理地址的映射装载到一个页表中。它以页面大小为间隔，为范围内的每个虚拟地址单独执行此操作。
+   */
   if(mappages(kernel_pagetable, va, sz, pa, perm) != 0)
     panic("kvmmap");
 }
@@ -145,6 +171,7 @@ kvmpa(uint64 va)
 // physical addresses starting at pa. va and size might not
 // be page-aligned. Returns 0 on success, -1 if walk() couldn't
 // allocate a needed page-table page.
+/*参数：页表根指针 虚拟地址的起始地址 映射大小 物理地址起始地址 权限*/
 int
 mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
 {
@@ -153,14 +180,17 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
 
   a = PGROUNDDOWN(va);
   last = PGROUNDDOWN(va + size - 1);
+  //使用无限循环处理每个页 直到映射完成
   for(;;){
-    if((pte = walk(pagetable, a, 1)) == 0)
+    if((pte = walk(pagetable, a, 1)) == 0)//如果查找或分配失败 返回-1
       return -1;
-    if(*pte & PTE_V)
+    if(*pte & PTE_V)//如果该页表项已经存在 代表改虚拟地址已经被映射 返回崩溃错误
       panic("remap");
+      //否则 进行虚拟地址到物理地址的映射 并且将该pte页表项设置为有效PTE_V
     *pte = PA2PTE(pa) | perm | PTE_V;
     if(a == last)
       break;
+    //映射完成后 更新虚拟地址和物理地址 处理下一个页
     a += PGSIZE;
     pa += PGSIZE;
   }
@@ -271,23 +301,71 @@ uvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
 
 // Recursively free page-table pages.
 // All leaf mappings must already have been removed.
+//用于递归释放页表占用的内存 前提是假设：
+// 所有叶节点映射（即实际的物理页面映射）已经被移除，因此它只处理页表本身的释放。
 void
 freewalk(pagetable_t pagetable)
 {
   // there are 2^9 = 512 PTEs in a page table.
+  //遍历整个页表
   for(int i = 0; i < 512; i++){
     pte_t pte = pagetable[i];
+    //pte & PTE_V 检查PTE是否有效
+    //pte & (PTE_R|PTE_W|PTE_X) 检查PTE是否未设置读、写、执行权限，未设置则说明这是一个指向下一级页表的PTE，而不是最后一层,即叶节点
+    //因为最后一层要指向实际的物理地址 PTE_R|PTE_W|PTE_X 三者其中至少一个被设置为1
     if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
       // this PTE points to a lower-level page table.
-      uint64 child = PTE2PA(pte);
-      freewalk((pagetable_t)child);
-      pagetable[i] = 0;
-    } else if(pte & PTE_V){
+      uint64 child = PTE2PA(pte);//提取物理地址部分
+      freewalk((pagetable_t)child);//只要页表有效且不是最后一层就递归调用 遍历整个页表
+      pagetable[i] = 0;//清零 确保释放后不会留下悬空指针
+    } else if(pte & PTE_V){//如果是叶节点且 R/W/X有被设置 和假设额宝墩 说明有叶节点未移除 触发panic
       panic("freewalk: leaf");
     }
   }
   kfree((void*)pagetable);
 }
+
+//lab3 第一个实验 print_pgtbl的实现
+
+/**
+ * 递归遍历页表并打印相关信息
+ * @param pagetable 所要打印的页表
+ * @param level 页表的层级
+ */
+ void
+ _vmprint(pagetable_t pagetable, int level){
+   // there are 2^9 = 512 PTEs in a page table.
+   for(int i = 0; i < 512; i++){
+     pte_t pte = pagetable[i];
+     // PTE_V is a flag for whether the page table is valid
+     if(pte & PTE_V){
+      //有效 则打印 先打印层级关系信息 ..代表第一层 .. .. ..最后一层
+       for (int j = 0; j < level; j++){
+         if (j) printf(" ");
+         printf("..");
+       }
+       uint64 child = PTE2PA(pte);//提取物理地址部分
+       printf("%d: pte %p pa %p\n", i, pte, child);
+       //说明不是最后一层 这是一个指向下一级页表的PTE 递归打印 层级level+1
+       if((pte & (PTE_R|PTE_W|PTE_X)) == 0){
+         // this PTE points to a lower-level page table.
+         _vmprint((pagetable_t)child, level + 1);
+       }
+     }
+   }
+ }
+ 
+ /**
+  * 打印页表的入口函数 
+  * @brief vmprint 打印页表
+  * @param pagetable 所要打印的页表
+  */
+ void
+ vmprint(pagetable_t pagetable){
+   printf("page table %p\n", pagetable);
+   _vmprint(pagetable, 1);
+ }
+ 
 
 // Free user memory pages,
 // then free page-table pages.

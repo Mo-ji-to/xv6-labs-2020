@@ -14,10 +14,12 @@ void freerange(void *pa_start, void *pa_end);
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
 
+
+//空闲页的列表元素struct run
 struct run {
   struct run *next;
 };
-
+//空闲列表受自旋锁的保护
 struct {
   struct spinlock lock;
   struct run *freelist;
@@ -34,7 +36,7 @@ void
 freerange(void *pa_start, void *pa_end)
 {
   char *p;
-  p = (char*)PGROUNDUP((uint64)pa_start);
+  p = (char*)PGROUNDUP((uint64)pa_start);//页边界对齐
   for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
     kfree(p);
 }
