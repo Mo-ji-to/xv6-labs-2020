@@ -22,6 +22,8 @@ static void freeproc(struct proc *p);
 extern char trampoline[]; // trampoline.S
 
 // initialize the proc table at boot time.
+/*原先的处理中 这段代码 在系统启用时调用 
+  初始化进程管理模块 确保进程表和内核栈在系统启动时已经准备好*/
 void
 procinit(void)
 {
@@ -34,12 +36,18 @@ procinit(void)
       // Allocate a page for the process's kernel stack.
       // Map it high in memory, followed by an invalid
       // guard page.
-      char *pa = kalloc();
-      if(pa == 0)
-        panic("kalloc");
-      uint64 va = KSTACK((int) (p - proc));
-      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;
+      
+      /*以下代码 为进程表中的为所有进程预分配内核栈*/ 
+
+      // char *pa = kalloc();
+      // if(pa == 0)
+      //   panic("kalloc");
+      // uint64 va = KSTACK((int) (p - proc));
+      // kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+      // p->kstack = va;
+
+      //上边的代码 在共享空间中为每一个进程分配好了内核栈 把这部分去掉
+      //移到allocproc中 也就是创建进程时 再创建内核栈
   }
   kvminithart();
 }
@@ -89,6 +97,7 @@ allocpid() {
 // If found, initialize state required to run in the kernel,
 // and return with p->lock held.
 // If there are no free procs, or a memory allocation fails, return 0.
+//在进程表中找到一个未使用的进程 分配进程必要的资源 并初始化进程上下文
 static struct proc*
 allocproc(void)
 {
@@ -104,6 +113,7 @@ allocproc(void)
   }
   return 0;
 
+  //找到未使用的进程 进行如下操作
 found:
   p->pid = allocpid();
 
@@ -120,6 +130,24 @@ found:
     release(&p->lock);
     return 0;
   }
+
+  // Init the kernal page table
+  //???
+  p->kernelpt = proc_kpt_init();
+  if(p->kernelpt == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
+  //分配一个物理页 作为新进程的内核栈使用
+  char *pa = kalloc();
+  if(pa == 0)
+    panic("kalloc");
+  uint64 va = KSTACK((int) (p - proc));//内核栈映射到地址  ？？ 上
+  kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+  p->kstack = va;//记录内核栈虚拟地址
+
 
   // Set up new context to start executing at forkret,
   // which returns to user space.
@@ -151,6 +179,27 @@ freeproc(struct proc *p)
   p->xstate = 0;
   p->state = UNUSED;
 }
+
+//用来遍历整个内核页表 并将所有有效的页表项清空为0
+//如果这个页表项不在最后一层的页表上 需要继续进行递归
+void
+proc_freekernelpt(pagetable_t kernelpt)
+{
+  // similar to the freewalk method
+  // there are 2^9 = 512 PTEs in a page table.
+  for(int i = 0; i < 512; i++){
+    pte_t pte = kernelpt[i];
+    if(pte & PTE_V){
+      kernelpt[i] = 0;
+      if ((pte & (PTE_R|PTE_W|PTE_X)) == 0){
+        uint64 child = PTE2PA(pte);
+        proc_freekernelpt((pagetable_t)child);
+      }
+    }
+  }
+  kfree((void*)kernelpt);
+}
+
 
 // Create a user page table for a given process,
 // with no user memory, but with trampoline pages.
@@ -446,6 +495,14 @@ wait(uint64 addr)
   }
 }
 
+//将进程的内核页表加载到SATP寄存器
+void
+proc_inithart(pagetable_t kpt){
+  w_satp(MAKE_SATP(kpt));
+  sfence_vma(); //清除快表缓存 刷新TLB缓存 确保地址转换表的更改生效
+}
+
+
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
 // Scheduler never returns.  It loops, doing:
@@ -473,7 +530,15 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+
+        //切换到进程独立的内核页表
+        proc_inithart(p->kernelpt);
+
+        //调度 执行进程
         swtch(&c->context, &p->context);
+
+        //切换会全局内核页表
+        kvminithart();
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.

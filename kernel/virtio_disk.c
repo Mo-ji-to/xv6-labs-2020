@@ -17,6 +17,8 @@
 #include "buf.h"
 #include "virtio.h"
 
+#include "proc.h"
+
 // the address of virtio mmio register r.
 #define R(r) ((volatile uint32 *)(VIRTIO0 + (r)))
 
@@ -177,6 +179,7 @@ virtio_disk_rw(struct buf *b, int write)
   // the data, one for a 1-byte status result.
 
   // allocate the three descriptors.
+  //分配三个描述符
   int idx[3];
   while(1){
     if(alloc3_desc(idx) == 0) {
@@ -184,6 +187,7 @@ virtio_disk_rw(struct buf *b, int write)
     }
     sleep(&disk.free[0], &disk.vdisk_lock);
   }
+  
   
   // format the three descriptors.
   // qemu's virtio-blk.c reads them.

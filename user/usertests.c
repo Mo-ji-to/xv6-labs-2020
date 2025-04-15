@@ -15,6 +15,11 @@
 // the test runner reports "OK" or "FAILED".  Some tests result in
 // kernel printing usertrap messages, which can be ignored if test
 // prints "OK".
+// 测试 xv6 系统调用。不带参数运行 usertests 将运行所有测试，
+// 而 usertests <name> 则运行指定的 <name> 测试。测试运行器为
+// 每个测试创建一个进程，并根据进程的退出状态，
+// 测试运行器报告“OK”或“FAILED”。某些测试会导致
+// 内核打印用户陷阱消息，如果测试打印“OK”，则可以忽略这些消息。
 //
 
 #define BUFSZ  (MAXOPBLOCKS+2)*BSIZE
