@@ -31,7 +31,7 @@ extern char trampoline[]; // trampoline.S
 
 /*
  * create a direct-map page table for the kernel.
- 创建并初始化内核页表 
+ 创建并初始化   全局 内核页表！！ 
  并完成内核的虚拟内存映射 确保内核能够正确访问硬件设备、内核代码和数据段等。
 kvmmap调用mappages()
  */
@@ -74,6 +74,13 @@ kvminithart()
 {
   w_satp(MAKE_SATP(kernel_pagetable));
   sfence_vma();
+}
+//进程内核页表假造到SATP寄存器
+//将进程的内核页表加载到SATP寄存器
+void
+proc_inithart(pagetable_t kpt){
+  w_satp(MAKE_SATP(kpt));
+  sfence_vma(); //清除快表缓存 刷新TLB缓存 确保地址转换表的更改生效
 }
 
 // Return the address of the PTE in page table pagetable
@@ -163,9 +170,10 @@ uvmmap(pagetable_t pagetable, uint64 va, uint64 pa, uint64 sz, int perm)
 }
 
 // Create a kernel page table for the process
+//用于在allocproc中初始化进程的内核页表 uvmmap用于对进程的内核页表进行映射
 pagetable_t
 proc_kpt_init(){
-  pagetable_t kernelpt = uvmcreate();
+  pagetable_t kernelpt = uvmcreate();//在这里边执行kalloc 其实就是为进程页表分配一个页面大小的内存
   if (kernelpt == 0) return 0;
   uvmmap(kernelpt, UART0, UART0, PGSIZE, PTE_R | PTE_W);
   uvmmap(kernelpt, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
@@ -183,7 +191,8 @@ proc_kpt_init(){
 // addresses on the stack.
 // assumes va is page aligned.
 
-//内核虚拟地址映射到物理地址
+//内核虚拟地址映射到物理地址  这个函数在内核运行需要访问物理地址时调用
+//而kvmmap主要是系统启动时调用 完成内核页表初始化 建立映射关系
 uint64
 kvmpa(uint64 va)
 {

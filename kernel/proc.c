@@ -39,16 +39,20 @@ procinit(void)
       
       /*以下代码 为进程表中的为所有进程预分配内核栈*/ 
 
-      // char *pa = kalloc();
+      // char *pa = kalloc(); //分配一个物理页 作为内核栈的存储空间
       // if(pa == 0)
       //   panic("kalloc");
-      // uint64 va = KSTACK((int) (p - proc));
+      //计算不同进程的内核栈的虚拟地址 确保不同的进程的内核栈位于不同的虚拟地址区域 避免冲突
+      // uint64 va = KSTACK((int) (p - proc)); 
+      //内核栈 虚拟地址 va 映射到物理地址pa
       // kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+      //设置进程的kstack字段为计算出来的虚拟地址va
       // p->kstack = va;
 
       //上边的代码 在共享空间中为每一个进程分配好了内核栈 把这部分去掉
       //移到allocproc中 也就是创建进程时 再创建内核栈
   }
+  //刷新页表 使新映射的内核栈生效
   kvminithart();
 }
 
@@ -132,7 +136,7 @@ found:
   }
 
   // Init the kernal page table
-  //???
+  //为每个进程分配内核页表并映射
   p->kernelpt = proc_kpt_init();
   if(p->kernelpt == 0){
     freeproc(p);
@@ -140,12 +144,14 @@ found:
     return 0;
   }
 
+  //为每一个进程 在各自的内核页表映射的空间下 分配各自的内核栈
   //分配一个物理页 作为新进程的内核栈使用
   char *pa = kalloc();
   if(pa == 0)
     panic("kalloc");
-  uint64 va = KSTACK((int) (p - proc));//内核栈映射到地址  ？？ 上
-  kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+  uint64 va = KSTACK((int) (p - proc));//内核栈映射到各自内核页表的固定位置
+  uvmmap(p->kernelpt,va,(uint64)pa,PGSIZE,PTE_R | PTE_W);
+  //kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
   p->kstack = va;//记录内核栈虚拟地址
 
 
@@ -177,6 +183,17 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  
+
+  //释放进程内核栈
+  uvmunmap(p->kernelpt,p->kstack,1,1);
+  p->kstack = 0;
+
+  //递归释放进程的内核页表
+  proc_freekernelpt(p->kernelpt);
+  p->kernelpt = 0;
+
+
   p->state = UNUSED;
 }
 
@@ -191,6 +208,9 @@ proc_freekernelpt(pagetable_t kernelpt)
     pte_t pte = kernelpt[i];
     if(pte & PTE_V){
       kernelpt[i] = 0;
+      //如果不是最后一层页表 则继续进行递归释放（将有效的页表项清零 并释放物理内存）
+      //而最后一层页表不能清除 因为内核中最后一层对应的物理地址 
+      // 清除的话会导致内核运行需要的关键物理页被释放 导致内核崩溃
       if ((pte & (PTE_R|PTE_W|PTE_X)) == 0){
         uint64 child = PTE2PA(pte);
         proc_freekernelpt((pagetable_t)child);
@@ -495,12 +515,7 @@ wait(uint64 addr)
   }
 }
 
-//将进程的内核页表加载到SATP寄存器
-void
-proc_inithart(pagetable_t kpt){
-  w_satp(MAKE_SATP(kpt));
-  sfence_vma(); //清除快表缓存 刷新TLB缓存 确保地址转换表的更改生效
-}
+
 
 
 // Per-CPU process scheduler.
@@ -537,7 +552,7 @@ scheduler(void)
         //调度 执行进程
         swtch(&c->context, &p->context);
 
-        //切换会全局内核页表
+        //切换回全局内核页表
         kvminithart();
 
         // Process is done running for now.
