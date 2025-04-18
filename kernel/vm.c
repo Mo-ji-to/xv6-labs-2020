@@ -500,26 +500,34 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 // Copy from user to kernel.
 // Copy len bytes to dst from virtual address srcva in a given page table.
 // Return 0 on success, -1 on error.
+//实现了从用户空间到内核空间的数据复制
+/*params:
+内核空间的目标地址 dst
+用户空间源虚拟地址srcva
+复制的字节数len
+*/
 int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
-  uint64 n, va0, pa0;
+  // uint64 n, va0, pa0;
 
-  while(len > 0){
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
-    n = PGSIZE - (srcva - va0);
-    if(n > len)
-      n = len;
-    memmove(dst, (void *)(pa0 + (srcva - va0)), n);
-
-    len -= n;
-    dst += n;
-    srcva = va0 + PGSIZE;
-  }
-  return 0;
+  //   //循环复制字节 
+  // while(len > 0){
+  //   va0 = PGROUNDDOWN(srcva);//向下对齐到页的起始地址
+  //   pa0 = walkaddr(pagetable, va0);//遍历查找用户页表中 用户虚拟地址va对应的物理地址pa0
+  //   if(pa0 == 0)
+  //     return -1;
+  //   n = PGSIZE - (srcva - va0);
+  //   if(n > len)
+  //     n = len;
+  //   memmove(dst, (void *)(pa0 + (srcva - va0)), n);//将用户空间的物理地址复制到内核空间的目标地址
+  //   //更新剩余长度和指针
+  //   len -= n;
+  //   dst += n;
+  //   srcva = va0 + PGSIZE;
+  // }
+  // return 0;
+  return copyin_new(pagetable,dst,srcva,len);
 }
 
 // Copy a null-terminated string from user to kernel.
@@ -529,38 +537,72 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 int
 copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
-  uint64 n, va0, pa0;
-  int got_null = 0;
+  return copyinstr_new(pagetable,dst,srcva,max);
+  // uint64 n, va0, pa0;
+  // int got_null = 0;
 
-  while(got_null == 0 && max > 0){
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
-    n = PGSIZE - (srcva - va0);
-    if(n > max)
-      n = max;
+  // while(got_null == 0 && max > 0){
+  //   va0 = PGROUNDDOWN(srcva);
+  //   pa0 = walkaddr(pagetable, va0);
+  //   if(pa0 == 0)
+  //     return -1;
+  //   n = PGSIZE - (srcva - va0);
+  //   if(n > max)
+  //     n = max;
 
-    char *p = (char *) (pa0 + (srcva - va0));
-    while(n > 0){
-      if(*p == '\0'){
-        *dst = '\0';
-        got_null = 1;
-        break;
-      } else {
-        *dst = *p;
-      }
-      --n;
-      --max;
-      p++;
-      dst++;
-    }
+  //   char *p = (char *) (pa0 + (srcva - va0));
+  //   while(n > 0){
+  //     if(*p == '\0'){
+  //       *dst = '\0';
+  //       got_null = 1;
+  //       break;
+  //     } else {
+  //       *dst = *p;
+  //     }
+  //     --n;
+  //     --max;
+  //     p++;
+  //     dst++;
+  //   }
 
-    srcva = va0 + PGSIZE;
-  }
-  if(got_null){
-    return 0;
-  } else {
-    return -1;
+  //   srcva = va0 + PGSIZE;
+  // }
+  // if(got_null){
+  //   return 0;
+  // } else {
+  //   return -1;
+  // }
+  
+}
+
+/*
+用于 将用户进程的页表中的物理地址映射 复制到 进程的内核页表中
+从而允许内核访问用户进程的内存区域
+@parms
+用户进程的旧内存大小uint64 oldsz,（字节为单位）
+用户进程的新内存大小uint64 newsz
+*/
+void
+u2kvmcopy(pagetable_t pagetable, pagetable_t kernelpt, uint64 oldsz, uint64 newsz){
+  pte_t *pte_from, *pte_to;
+  oldsz = PGROUNDUP(oldsz);//向上对齐？
+  //从oldsz开始 到 newsz结束   循环步长为 一个页长 4096字节 即逐页找到进程虚拟地址 对应的页表项
+  for (uint64 i = oldsz; i < newsz; i += PGSIZE){
+    //调用walk遍历获取用户页表虚拟地址对应的页表项 返回0说明源页表项不存在 触发错误
+    //否则返回第一级页表项，即源页表项的地址  pte_from则代表 当前进程用户页表虚拟地址i 所对应的页表项
+    if((pte_from = walk(pagetable, i, 0)) == 0)
+      panic("u2kvmcopy: src pte does not exist");
+    //调用walk获取进程内核页表虚拟地址i对应的页表项  不同的是第三个参数为1 则如果不存在则创造新的页表项
+    //则pte_to表示 当前进程内核页表中虚拟地址i对应的页表项
+    if((pte_to = walk(kernelpt, i, 1)) == 0)
+      panic("u2kvmcopy: pte walk failed");
+    //pa表示 用户页表虚拟地址所对应的物理地址映射
+    uint64 pa = PTE2PA(*pte_from);
+    //提取标志位并清除PTE_U  因为PTE_U一旦被设置  内核就无法访问这个页面
+    uint flags = (PTE_FLAGS(*pte_from)) & (~PTE_U);
+    //将用户页表虚拟地址对应的物理地址映射  转换为页表项格式
+    *pte_to = PA2PTE(pa) | flags;
   }
 }
+
+

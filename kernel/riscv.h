@@ -333,8 +333,9 @@ sfence_vma()
 #define PTE_U (1L << 4) // 1 -> user can access
 
 // shift a physical address to the right place for a PTE.
+//物理地址转换成页表项
 #define PA2PTE(pa) ((((uint64)pa) >> 12) << 10)
-
+//页表项转化成物理地址 即提取页表项中表示物理地址的部分
 #define PTE2PA(pte) (((pte) >> 10) << 12)
 
 #define PTE_FLAGS(pte) ((pte) & 0x3FF)
