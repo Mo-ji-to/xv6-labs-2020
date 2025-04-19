@@ -353,7 +353,7 @@ fork(void)
   np->sz = p->sz;
 
   //复制到新进程的内核页表
-  u2kvmcopy(np->pagetable,np->kernelpt,0,np->sz);
+ u2kvmcopy(np->pagetable,np->kernelpt,0,np->sz);
 
   np->parent = p;
 
