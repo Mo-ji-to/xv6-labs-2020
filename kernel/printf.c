@@ -132,3 +132,25 @@ printfinit(void)
   initlock(&pr.lock, "pr");
   pr.locking = 1;
 }
+
+/* backtrace : print the call stack of function */
+void backtrace()
+{
+  // 读出当前FP指针的值，使用上面添加的嵌入式汇编函数
+  // 根据FP指针的值计算出栈底位置，这将作为循环结束的条件
+  uint64 FramePointer = r_fp();
+  uint64 KernelTop = PGROUNDDOWN(FramePointer) + PGSIZE;
+  printf("backtrace:\n");
+  
+  // 如果没有到最后一级，则持续向前一级回溯
+  while(FramePointer < KernelTop)
+  {
+  	// 从FP-8这个位置取出上一级函数返回地址，打印出来
+    uint64 ReturnAddr = *(uint64*)(FramePointer - 8);
+    printf("%p\n", ReturnAddr);
+	
+	// 回溯到上一层函数栈帧
+    FramePointer = *(uint64*)(FramePointer - 16);
+  }
+  return;
+}
