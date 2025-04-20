@@ -99,8 +99,15 @@ struct proc {
   uint64 sz;                   // Size of process memory (bytes)
   pagetable_t pagetable;       // User page table
   struct trapframe *trapframe; // data page for trampoline.S
+  struct trapframe *alarmframe; //发生sigalarm调用时 用以保存之前的trapframe
+
   struct context context;      // swtch() here to run process
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+  int alarm_Interval;            // <触发alarm handler的时间间隔> 0表示禁用
+  int  alarm_ticks;                // <计时器，记录从上次触发handler到现在经过的ticks数量>
+  void(*alarm_handler)();              // <标志位，表示当前进程是否处于响应alarm的流程中>
+  int alarm_flag;               //是否有一个时钟中断正在执行且未返回
 };

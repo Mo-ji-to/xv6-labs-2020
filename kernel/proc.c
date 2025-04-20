@@ -113,6 +113,17 @@ found:
     return 0;
   }
 
+  //为alarm_trapframe分配陷阱帧
+  if((p->alarmframe = (struct trapframe *)kalloc()) == 0){
+    release(&p->lock);
+    return 0;
+  }
+  //进程创建初始化时alarm相关
+  p->alarm_Interval = 0;
+  p->alarm_ticks = 0;
+  p->alarm_handler = 0;
+  p->alarm_flag = 0;
+
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){
@@ -139,6 +150,12 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+  
+  //free alarmframe
+  if(p->alarmframe)
+    kfree((void*)p->alarmframe);
+  p->alarmframe = 0;
+
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
@@ -149,6 +166,13 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+
+  //free alarm
+  p->alarm_Interval = 0;
+  p->alarm_ticks = 0;
+  p->alarm_handler = 0;
+  p->alarm_flag = 0;
+
   p->state = UNUSED;
 }
 
