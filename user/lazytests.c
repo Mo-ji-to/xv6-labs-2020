@@ -10,6 +10,8 @@
 
 #define REGION_SZ (1024 * 1024 * 1024)
 
+//验证lazy allocation
+//分配大块虚拟内存（1GB），但仅稀疏访问部分页面，确保物理页按需分配。
 void
 sparse_memory(char *s)
 {
@@ -35,6 +37,7 @@ sparse_memory(char *s)
   exit(0);
 }
 
+//测试内存释放后 原有映射是否被正确取消
 void
 sparse_memory_unmap(char *s)
 {
@@ -73,6 +76,8 @@ sparse_memory_unmap(char *s)
   exit(0);
 }
 
+
+//测试物理内存耗尽时的行为
 void
 oom(char *s)
 {

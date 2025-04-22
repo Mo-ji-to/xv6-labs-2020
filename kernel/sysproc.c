@@ -51,12 +51,15 @@ sys_sbrk(void)
     return -1;
     先不做实际分配
     */
+  
   struct proc* p = myproc();
+  //uint64 sz = p->sz;
   if(n>0){
     p->sz += n; //惰性分配 仅改变sz字段
   }
   else if(p->sz + n > 0){
     p->sz = uvmdealloc(p->pagetable,p->sz,p->sz + n);
+    //p->sz = sz;
   }  //如果是减少内存 还是要马上执行 检查减去内存后是否大于0
   else{
     return -1;
