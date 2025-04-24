@@ -5,6 +5,9 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
+
 
 /*
  * the kernel's page table.
@@ -305,13 +308,18 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 // physical memory.
 // returns 0 on success, -1 on failure.
 // frees any allocated pages on failure.
+//fork()创建子进程 会调用这个函数 将父进程映射的物理页全部复制给子进程
+//写时复制只有写的时候才复制 去掉复制逻辑
+//只给对应的页添加上PTE_COW标志位
+//原本父进程中只读的页不做修改 只读页父子共享 只对可写的页修改
 int
 uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
+  //char *mem; 用不到了
+
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -319,14 +327,30 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
-    flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
+
+    //清除父进程中所有PTE_W并设置为PTE_COW 表示页是一个写时复制页（多个进程引用同个物理页）
+    //如果该页本身就不可写（只读） 则不会添加这个标志位
+    if(*pte & PTE_W){
+      *pte = (*pte & ~PTE_W) | PTE_COW;
+     }
+
+    flags = PTE_FLAGS(*pte);    //获取当前父进程的pte标志位
+
+    //将父进程映射的物理页直接map到子进程中，权限和父进程一致
+    //注意现在还都是不可写 而原本可写的页会有新增的PTE_COW写时复制标志
+    if(mappages(new,i,PGSIZE,(uint64)pa,flags) != 0)
       goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
-      goto err;
-    }
+
+    krefpage((void*)pa);    //映射的物理页引用数+1
+
+    //以下是复制的代码  现在不做复制 去掉
+    // if((mem = kalloc()) == 0)
+    //   goto err;
+    // memmove(mem, (char*)pa, PGSIZE);
+    // if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
+    //   kfree(mem);
+    //   goto err;
+    // }
   }
   return 0;
 
@@ -357,6 +381,11 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
   uint64 n, va0, pa0;
 
   while(len > 0){
+    //该函数是软件访问页表 不会触发缺页异常 所以要在这里检查复制的页是不是COW页
+    //是的话则执行复制操作
+     if(uvmcheckcowpage(dstva))
+       uvmcowcopy(dstva);
+
     va0 = PGROUNDDOWN(dstva);
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
@@ -439,4 +468,41 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+//检查虚拟地址所在页是否是COW页
+int uvmcheckcowpage(uint64 va){
+  pte_t* pte;
+  struct proc* p = myproc();
+
+  return va < p->sz
+        && ((pte = walk(p->pagetable,va,0)) != 0)
+        && (*pte & PTE_V)
+        && (*pte & PTE_COW);
+  //检查地址在进程内存范围内 && 地址有效  && 地址是COW页
+}
+
+
+//实现写时复制
+int uvmcowcopy(uint64 va){
+  pte_t* pte;
+  struct proc* p = myproc();
+
+  //获取虚拟地址的页表项
+  if((pte = walk(p->pagetable,va,0)) == 0)
+    panic("uvmcowcopy:walk");
+
+  uint64 pa = PTE2PA(*pte);//获取映射的物理地址
+  //获取新分配的物理页 如果原本的物理页引用数为1 则获取到的还是原本的物理页 ???
+  uint64 new = (uint64)kcopy_n_deref((void*) pa);
+  if(new == 0)  //内存不足的情况
+    return -1;
+
+  //修改新的映射 恢复写权限 清除COW标志
+  uint64 flags = (PTE_FLAGS(*pte) | PTE_W) & ~PTE_COW;
+  uvmunmap(p->pagetable,PGROUNDDOWN(va),1,0);//清除旧的映射
+  if(mappages(p->pagetable,va,1,new,flags) == -1) //新的映射
+    panic("uvmcowcopy:mappages");
+
+  return 0;
 }
