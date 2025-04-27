@@ -1,9 +1,15 @@
 // Saved registers for kernel context switches.
+// 译：内核上下文切换时保存的寄存器
 struct context {
+  // 返回地址寄存器和内核栈指针
+  // 单独列出来，这是上下文切换的关键
+  // 它们本质上控制着控制流和内核栈
   uint64 ra;
   uint64 sp;
 
   // callee-saved
+  // 译：callee-saved寄存器
+  // 这些是被调用者应该保存的寄存器
   uint64 s0;
   uint64 s1;
   uint64 s2;
@@ -41,6 +47,17 @@ extern struct cpu cpus[NCPU];
 // the trapframe includes callee-saved user registers like s0-s11 because the
 // return-to-user path via usertrapret() doesn't return through
 // the entire kernel call stack.
+//译：每个进程用于中断处理代码的数据结构（位于 trampoline.S 中）。
+// 这个结构体单独占一页，位于用户页表中的 trampoline 页的下方。
+// 在内核页表中没有特别映射。
+// sscratch 寄存器指向这里。
+// uservec 在 trampoline.S 中将用户寄存器保存到 trapframe 中，
+// 然后从 trapframe 中初始化 kernel_sp、kernel_hartid、kernel_satp 等寄存器，
+// 并跳转到 kernel_trap。
+// usertrapret() 和 userret 在 trampoline.S 中设置 trapframe 的 kernel_* 字段，
+// 从 trapframe 中恢复用户寄存器，切换到用户页表，并进入用户态。
+// trapframe 包含了用户保存的寄存器（如 s0-s11），
+// 因为通过 usertrapret() 返回用户态的路径不会通过整个内核调用栈返回。
 struct trapframe {
   /*   0 */ uint64 kernel_satp;   // kernel page table
   /*   8 */ uint64 kernel_sp;     // top of process's kernel stack

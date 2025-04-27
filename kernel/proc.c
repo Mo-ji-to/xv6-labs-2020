@@ -453,19 +453,45 @@ wait(uint64 addr)
 //  - swtch to start running that process.
 //  - eventually that process transfers control
 //    via swtch back to the scheduler.
+// 译：每个CPU都有一个的进程的调度器
+// 每个CPU都会在初始化完成之后调用scheduler()函数
+// scheduler函数永不返回，而是保持死循环做以下事情：
+// -选择一个进程执行
+// -调用swtch(第二次调用swtch)来执行新进程
+// -最终进程会将控制权通过swtch再次转回scheduler(即下一次调度)
 void
 scheduler(void)
 {
+  // 获取当前CPU，这是在系统完成初始化首次
+  // 进入此函数时才会执行的代码
   struct proc *p;
   struct cpu *c = mycpu();
   
+  // 设置当前CPU核心正在运行的进程为空
+  // 这条设置至关重要，它保证了内核进程不会被时钟中断打断！！
+  // 事实上在系统刚启动时，所有核心都没有进程在运行
   c->proc = 0;
+
+  //永不退出的死循环
   for(;;){
     // Avoid deadlock by ensuring that devices can interrupt.
+    // 译：通过允许设备中断来避免死锁
+
+    /* 这个地方非常的细节和困难，分成两个部分来说：
+    1.假设当前进程组中有一个进程，它正好沉睡着等待一个设备中断：
+
+    2.你可能会问，那时钟中断会打断这个内核进程吗？内核进程会发生自交换吗？
+    事实上，在内核陷阱程序kerneltrap中调用yield前
+    会首先判断当前是否是内核进程在执行(myproc()!=0)
+    所以内核线程不会触发yield()函数
+    */
     intr_on();
     
+    // 扫描一次进程组，找出其中可以被调度的进程
     int nproc = 0;
     for(p = proc; p < &proc[NPROC]; p++) {
+      // 调度之前先获取此 新进程的锁
+      // 这个锁将会在返回新进程的yield时释放(跨进程)
       acquire(&p->lock);
       if(p->state != UNUSED) {
         nproc++;
@@ -474,14 +500,25 @@ scheduler(void)
         // Switch to chosen process.  It is the process's job
         // to release its lock and then reacquire it
         // before jumping back to us.
+        // 译：切换到选中的进程，释放它自己的锁
+        // 并在下次跳回到本函数之前再次获取锁都是进程本身的职责
+        // 修改进程状态，并调用swtch(第二次调用)
+        // 此时新进程将被调度
         p->state = RUNNING;
         c->proc = p;
         swtch(&c->context, &p->context);
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
+        // 译：进程至此已经完成运行  
+        // 也就是每次进程调度 旧进程到这里就彻底结束 
+        //每次调度 新进程就从这里恢复
+        // 它应该在返回之前将其状态p->state改变
+        // c->proc=0表示运行在内核进程
         c->proc = 0;
       }
+
+      // 释放yield函数中持有的 旧进程的锁，否则可能导致死锁(跨进程)
       release(&p->lock);
     }
     if(nproc <= 2) {   // only init and sh exist
@@ -498,34 +535,69 @@ scheduler(void)
 // be proc->intena and proc->noff, but that would
 // break in the few places where a lock is held but
 // there's no process.
+// 译：切换到scheduler线程，必须持有旧进程的锁
+// 并且已经改变了进程的执行状态
+// 保存并恢复intena，intena是内核线程的属性，而不是CPU的属性
+// 这本来应该是proc->intena和proc->noff表示的，但在有些罕见情况下
+// 比如持有锁却无进程可以调度时，这个规律是不成立的
 void
 sched(void)
 {
   int intena;
   struct proc *p = myproc();
 
+  // sched函数会先做一系列的合法性检查
+  // 是否持有当前进程的锁
   if(!holding(&p->lock))
     panic("sched p->lock");
+
+  // 锁链长度是否为1
+  // 这是为了确认当前CPU除了持有当前进程锁之外
+  // 释放了其他所有的的锁
   if(mycpu()->noff != 1)
     panic("sched locks");
+
+  // 如果当前进程状态为仍在运行，则出错
   if(p->state == RUNNING)
     panic("sched running");
+
+  // 中断是否关闭？事实上，在我们成功获取进程锁之后
+  // 在正常情况下中断就已经关闭了
   if(intr_get())
     panic("sched interruptible");
 
+  // 记录当前CPU原始的中断开关状态
+  // 新进程可能会影响这个标志
   intena = mycpu()->intena;
+
+  // 第一次调用swtch，换入内核线程，并换出当前的旧线程
+  // 请注意：旧进程下一次再次被调度时，应当从下一行代码开始执行
   swtch(&p->context, &mycpu()->context);
+
+  // 下一次再次返回时恢复进程在此CPU的原始中断开关状态
   mycpu()->intena = intena;
 }
 
 // Give up the CPU for one scheduling round.
+// 译：放弃CPU来开启一个调度轮
 void
 yield(void)
 {
+  // 获取当前进程并上锁，加锁是为了保护进程状态结构体的访问互斥性
+  // 防止在修改进程状态时导致的不变量临时为假的情况
+  // 这个锁在scheduler中被释放(跨进程)
   struct proc *p = myproc();
   acquire(&p->lock);
+
+  // 首先修改进程状态为RUNNABLE
   p->state = RUNNABLE;
+
+  // 调用sched完成当前进程上下文的保存
+  // 控制流自此会转向调度(scheduler)线程
   sched();
+
+  // 进程再次返回时才可以释放之前持有的锁
+  // 这个锁之前由scheduler函数获取，在这里释放(跨进程)
   release(&p->lock);
 }
 
