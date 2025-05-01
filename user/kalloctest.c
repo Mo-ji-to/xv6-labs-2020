@@ -22,38 +22,58 @@ main(int argc, char *argv[])
   exit(0);
 }
 
+
+/*
+从buf缓冲区中提取一个整数值
+并选择是否打印缓冲区的内容
+*/
 int ntas(int print)
 {
   int n;
   char *c;
 
+  //检查缓冲区buf是否有统计数据
   if (statistics(buf, SZ) <= 0) {
     fprintf(2, "ntas: no stats\n");
   }
+  //从buf中查找第一个等于号=的位置
   c = strchr(buf, '=');
+  //从等于号后面第二个字符开始，将字符串转换为整数
   n = atoi(c+2);
+  //如果print不等于0 则打印缓冲区内容
   if(print)
     printf("%s", buf);
+  //返回提取的整数值
   return n;
 }
 
+/*
+用来验证sbrk内存分配和释放的准确性
+创建多个子进程 并对每个子进程进行一定次数的内存分配和释放操作 检查统计结果*/
 void test1(void)
 {
   void *a, *a1;
   int n, m;
-  printf("start test1\n");  
+  printf("start test1\n"); 
+  //获取初始的资源统计值m(如内存页数量) 不打印
   m = ntas(0);
+  //创建NCHILD个子进程
   for(int i = 0; i < NCHILD; i++){
     int pid = fork();
     if(pid < 0){
       printf("fork failed");
       exit(-1);
     }
+    //每个子进程循环执行内存分配和释放的操作N次
     if(pid == 0){
       for(i = 0; i < N; i++) {
+        /*分配4KB内存 返回的是分配前的起始地址a*/
         a = sbrk(4096);
+        //写入数据1 确保内存被实际分配（避免因为lazy allocation引起的延迟分配）
         *(int *)(a+4) = 1;
+        //释放刚刚分配的4KB内存 返回的是释放前的起始地址a1
         a1 = sbrk(-4096);
+        //a1和a地址差了一个物理页 
         if (a1 != a + 4096) {
           printf("wrong sbrk\n");
           exit(-1);
@@ -62,12 +82,14 @@ void test1(void)
       exit(-1);
     }
   }
-
+  //父进程等待子进程结束
   for(int i = 0; i < NCHILD; i++){
     wait(0);
   }
   printf("test1 results:\n");
+  //获取最终的资源统计值n
   n = ntas(1);
+  //检查资源统计值差是否小于10
   if(n-m < 10) 
     printf("test1 OK\n");
   else
@@ -77,6 +99,12 @@ void test1(void)
 //
 // countfree() from usertests.c
 //
+/*
+计算当前系统中可用的内存页面数量。
+使用sbrk函数不断尝试分配内存，直到分配失败为止。
+在分配过程中，修改分配到的内存以确保其被实际分配。
+最后释放分配的内存并返回分配的内存页面数量。
+*/
 int
 countfree()
 {
