@@ -15,18 +15,18 @@ struct file {
 
 // in-memory copy of an inode
 struct inode {
-  uint dev;           // Device number
-  uint inum;          // Inode number
-  int ref;            // Reference count
-  struct sleeplock lock; // protects everything below here
-  int valid;          // inode has been read from disk?
+  uint dev;           // 设备编号，标识该 inode 所在的设备。
+  uint inum;          // inode 编号，唯一标识该文件系统中的一个 inode。
+  int ref;            // 引用计数，表示当前有多少个进程正在使用这个 inode
+  struct sleeplock lock; // 睡眠锁，用于保护该 inode 的并发访问。
+  int valid;          // 表示 inode 是否已经从磁盘读取到内存中
 
   short type;         // copy of disk inode
   short major;
   short minor;
   short nlink;
   uint size;
-  uint addrs[NDIRECT+1];
+  uint addrs[NDIRECT+2];
 };
 
 // map major device number to device functions.
