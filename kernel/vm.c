@@ -6,6 +6,12 @@
 #include "defs.h"
 #include "fs.h"
 
+#include "fcntl.h"
+#include "spinlock.h"
+#include "sleeplock.h"
+#include "file.h"
+#include "proc.h"
+
 /*
  * the kernel's page table.
  */
@@ -427,5 +433,50 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return 0;
   } else {
     return -1;
+  }
+}
+
+
+//实现映射释放的功能
+//释放mmap映射的页  根据PTE_D和MAP_SHARED判断是否修改写回磁盘
+void
+vmaunmap(pagetable_t pagetable, uint64 va, uint64 nbytes, struct vma *v)
+{
+  uint64 a;
+  pte_t *pte;
+
+  // printf("unmapping %d bytes from %p\n",nbytes, va);
+
+  // borrowed from "uvmunmap"
+  //查找范围内的每一个页
+  for(a = va; a < va + nbytes; a += PGSIZE){
+    if((pte = walk(pagetable, a, 0)) == 0)  //读取va对应的pte 
+      continue;
+
+    if(PTE_FLAGS(*pte) == PTE_V)
+      panic("sys_munmap: not a leaf");
+
+    if(*pte & PTE_V){
+      uint64 pa = PTE2PA(*pte);
+      //检查PTE_D是否被设置 设置了代表被修改 需要写回磁盘
+      if((*pte & PTE_D) && (v->flags & MAP_SHARED)) { //需要将修改写回磁盘
+        begin_op();
+        ilock(v->f->ip);
+        uint64 aoff = a - v->vastart; //相较于vma的偏移量 offset relative to the start of memory range
+        if(aoff < 0) { // 第一页 且是不满PGSIZE的一个页 也就是不完整的一个页  if the first page is not a full 4k page
+          //aoff < 0 第一页起始地址不在边界上时 也就是不满PGSIZE的一个页   那么写入文件的数据大小
+          writei(v->f->ip, 0, pa + (-aoff), v->offset, PGSIZE + aoff);
+        } else if(aoff + PGSIZE > v->sz){  // 最后一页是不满PGSIZE的一个页 if the last page is not a full 4k page
+          writei(v->f->ip, 0, pa, v->offset + aoff, v->sz - aoff);
+        } else { // full 4k pages
+          //中间的完整页直接按页写入
+          writei(v->f->ip, 0, pa, v->offset + aoff, PGSIZE);
+        }
+        iunlock(v->f->ip);
+        end_op();
+      }
+      kfree((void*)pa);
+      *pte = 0;
+    }
   }
 }

@@ -15,6 +15,7 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "memlayout.h"
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
@@ -484,3 +485,177 @@ sys_pipe(void)
   }
   return 0;
 }
+
+//mmap系统调用实现
+uint64 sys_mmap(void){
+  uint64 addr, sz, offset;
+  int prot, flags, fd; 
+  struct file *f;
+
+  //读取传入参数
+  if(argaddr(0, &addr) < 0 || argaddr(1, &sz) < 0 || argint(2, &prot) < 0
+    || argint(3, &flags) < 0 || argfd(4, &fd, &f) < 0 || argaddr(5, &offset) < 0 || sz == 0)
+    {
+      return -1;
+    }
+    
+
+  //以下情况直接返回-1
+  if((!f->readable && (prot & (PROT_READ)))  //源文件不可读 vma映射为可读
+    || (!f->writable && (prot & PROT_WRITE) && !(flags & MAP_PRIVATE)))//源文件不可写 vma映射为可写并且设置了将修改写回源文件
+    {
+      return -1;
+    }
+
+  sz = PGROUNDUP(sz); //因为xv6进程内存空间是从低往高生长  所以要分配sz大小的内存区域 向上对齐
+
+  struct proc *p = myproc();
+  struct vma *v = 0;
+  uint64 vaend = MMAPEND; // non-inclusive
+
+  //遍历查询未被使用的vma 并且计算当前已经使用的vma的最低地址
+  for(int i=0;i<NVMA;i++) {
+    struct vma *vv = &p->vmas[i];
+    if(vv->valid == 0) {
+      if(v == 0) {//v == 0 表示还未找到空闲的vma
+        v = &p->vmas[i];
+        // found free vma;
+        v->valid = 1;
+      }
+    } else if(vv->vastart < vaend) {//遍历到的p->vmas[i]不为空闲的 判断其开始地址是否小于vaend
+      vaend = PGROUNDDOWN(vv->vastart);//向下对齐 更新vaend 确保vaend表示的是 已经使用的vma中的最低起始地址
+    }
+  }
+
+  //没找到空闲的vma
+  if(v == 0){
+    panic("mmap: no free vma");
+  }
+
+  //设置vma属性
+  //因为sz和vaend已经对齐过了 
+  v->vastart = vaend - sz;//设置将要映射的文件虚拟内存区域起始地址为  vaend - sz  即已经使用的vma中的最低虚拟地址减去 要映射的内存区域大小sz
+  //这样的操作 就相当与不断找最低的虚拟地址  然后从那个虚拟地址-sz开始映射  sbrk从低到高分配 mmap相当于向下生长
+  v->sz = sz;
+  v->prot = prot;
+  v->flags = flags;
+  v->f = f; // assume f->type == FD_INODE
+  v->offset = offset;
+
+  //增加源文件引用数
+  filedup(v->f);
+
+  return v->vastart;
+}
+
+// 通过虚拟地址找到对应的vma
+struct vma *findvma(struct proc *p, uint64 va) {
+  for(int i=0;i<NVMA;i++) {
+    struct vma *vv = &p->vmas[i];
+    //如果va地址在某一个vma范围内 则返回这个vma
+    if(vv->valid == 1 && va >= vv->vastart && va < vv->vastart + vv->sz) {
+      return vv;
+    }
+  }
+  return 0;
+}
+
+
+//给虚拟地址分配物理页并建立映射
+int vmatrylazytouch(uint64 va) {
+  struct proc *p = myproc();
+  //找到访问的虚拟地址va对应的 虚拟内存映射vma *v
+  struct vma *v = findvma(p, va);
+  if(v == 0) {
+    return 0;
+  }
+
+  // printf("vma mapping: %p => %d\n", va, v->offset + PGROUNDDOWN(va - v->vastart));
+
+  // 分配物理地址 allocate physical page
+  void *pa = kalloc();
+  if(pa == 0) {
+    panic("vmalazytouch: kalloc");
+  }
+  memset(pa, 0, PGSIZE);
+  
+  // 从磁盘读取文件到对应的虚拟内存映射 vma *v中 read data from disk
+  begin_op();
+  ilock(v->f->ip);
+  readi(v->f->ip, 0, (uint64)pa, v->offset + PGROUNDDOWN(va - v->vastart), PGSIZE);
+  iunlock(v->f->ip);
+  end_op();
+
+  // 根据vma *v文件映射的虚拟内存 设置va地址对应的页表属性set appropriate perms, then map it.
+  int perm = PTE_U;
+  if(v->prot & PROT_READ)
+    perm |= PTE_R;
+  if(v->prot & PROT_WRITE)
+    perm |= PTE_W;
+  if(v->prot & PROT_EXEC)
+    perm |= PTE_X;
+
+  //建立映射  va--->>>pa
+  if(mappages(p->pagetable, va, PGSIZE, (uint64)pa, PTE_R | PTE_W | PTE_U) < 0) {
+    panic("vmalazytouch: mappages");
+  }
+
+  return 1;
+}
+
+
+//释放vma映射的页
+uint64
+sys_munmap(void)
+{
+  uint64 addr, sz;//用户传入要释放的地址 和释放的大小
+
+  if(argaddr(0, &addr) < 0 || argaddr(1, &sz) < 0 || sz == 0)
+    return -1;
+
+  struct proc *p = myproc();
+
+  //找到要释放的地址addr对应的 vma映射区域
+  struct vma *v = findvma(p, addr);
+  if(v == 0) {
+    return -1;
+  }
+  //释放的区域不能在vma虚拟内存区域中“打洞 ”
+  //也就是 要释放的起始地址addr在中间时，加上释放区域的大小sz后，不能小于vma区域的最高地址
+  if(addr > v->vastart && addr + sz < v->vastart + v->sz) {
+    // trying to "dig a hole" inside the memory range.
+    return -1;
+  }
+
+  uint64 addr_aligned = addr;
+  if(addr > v->vastart) {
+    //如果释放的addr处于一个页的中间 则向上对齐 要按页来释放
+    //否则 会导致这个addr处于的页 后半部分被释放 前半部分不释放（进程地址空间由低到高生长）
+    addr_aligned = PGROUNDUP(addr);
+  }
+
+  //计算要释放的字节数
+  int nunmap = sz - (addr_aligned-addr); // nbytes to unmap
+  if(nunmap < 0)
+    nunmap = 0;
+  
+
+  //从addr_aligned开始释放nunmap字节数
+  vmaunmap(p->pagetable, addr_aligned, nunmap, v); // custom memory page unmap routine for mmapped pages.
+
+  //释放完毕后 调整进程内存空间状态 也就是调整虚拟内存区域vma的状态
+  if(addr <= v->vastart && addr + sz > v->vastart) { //如果释放区域涉及到了 vma映射区域中的开始部分
+    v->offset += addr + sz - v->vastart;//修改映射文件内容的起点位置
+    v->vastart = addr + sz;
+  }
+  v->sz -= sz;
+
+  if(v->sz <= 0) {//释放后sz<=0 说明该vma映射区域已经完全释放
+    fileclose(v->f);//关闭对应的文件
+    v->valid = 0;//标记为无效vma  后续申请时才会再使用
+  }
+
+  return 0;  
+}
+
+
